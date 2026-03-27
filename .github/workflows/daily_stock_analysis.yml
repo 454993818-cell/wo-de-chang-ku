@@ -1,4 +1,3 @@
-
 name: Daily Stock Analysis (Feishu Only)
 on:
   schedule:
@@ -37,6 +36,10 @@ jobs:
           FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL")
           STOCK_LIST = os.getenv("STOCK_LIST").split(",") if os.getenv("STOCK_LIST") else []
 
+          print("===== 开始调试 =====")
+          print("Webhook URL 长度:", len(FEISHU_WEBHOOK_URL) if FEISHU_WEBHOOK_URL else 0)
+          print("监控股票列表:", STOCK_LIST)
+
           def get_recent_trade_date():
               today = datetime.today()
               for i in range(7):
@@ -44,36 +47,40 @@ jobs:
                   try:
                       df = ak.stock_zh_index_daily(symbol="sh000001", start_date=date, end_date=date)
                       if not df.empty:
+                          print("找到交易日:", date)
                           return date
-                  except:
+                  except Exception as e:
+                      print(f"日期 {date} 测试失败: {e}")
                       continue
+              print("使用兜底日期: 20260327")
               return "20260327"
 
           def send_feishu(content):
               if not FEISHU_WEBHOOK_URL:
-                  print("Webhook 未配置")
+                  print("❌ 错误: FEISHU_WEBHOOK_URL 未配置")
                   return
               msg = {
-                  "msg_type": "post",
-                  "content": {
-                      "post": {
-                          "zh_cn": {
-                              "title": "每日股票分析",
-                              "content": [[{"tag": "text", "text": content}]]
-                          }
-                      }
-                  }
+                  "msg_type": "text",
+                  "content": {"text": content}
               }
               try:
+                  print("正在发送飞书消息...")
                   r = requests.post(FEISHU_WEBHOOK_URL, json=msg, timeout=10)
-                  print("发送结果:", r.status_code, r.text)
+                  print(f"✅ 发送状态码: {r.status_code}")
+                  print(f"✅ 响应内容: {r.text}")
+                  return r.status_code == 200
               except Exception as e:
-                  print("发送失败:", e)
+                  print(f"❌ 发送异常: {e}")
+                  return False
 
           def main():
               trade_date = get_recent_trade_date()
-              send_feishu(f"测试消息：当前使用交易日 {trade_date}")
-              
+              # 先发一条极简测试消息
+              test_ok = send_feishu(f"【测试】云端系统运行成功，当前交易日: {trade_date}")
+              if not test_ok:
+                  print("❌ 测试消息发送失败，请检查 Webhook")
+                  return
+
               report = f"【每日股票分析】\n交易日: {trade_date}\n\n"
               for code in STOCK_LIST:
                   code = code.strip()
@@ -97,6 +104,7 @@ jobs:
                   except Exception as e:
                       report += f"- {code}: 获取数据失败 ({str(e)})\n"
               
+              print("开始发送正式报告...")
               send_feishu(report)
 
           if __name__ == "__main__":
