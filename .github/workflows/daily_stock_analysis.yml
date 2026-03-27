@@ -1,51 +1,112 @@
+
 name: Daily Stock Analysis (Feishu Only)
 on:
   schedule:
     - cron: '30 6 * * 1-5'  # 北京时间 14:30 执行
   workflow_dispatch:
+
 jobs:
   analyze:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pandas akshare
+          pip install requests pandas akshare python-dotenv
+
       - name: Run analysis script
         env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           STOCK_LIST: ${{ secrets.STOCK_LIST }}
-          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
         run: |
-          cat > main.py << 'EOF'
+          python3 - << 'EOF'
           import os
           import requests
+          import pandas as pd
           import akshare as ak
+          from datetime import datetime, timedelta
 
-          stock_list = os.getenv("STOCK_LIST", "").split(",")
-          feishu_webhook = os.getenv("FEISHU_WEBHOOK", "")
+          # ---------------------- 配置区 ----------------------
+          FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL")
+          STOCK_LIST = os.getenv("STOCK_LIST").split(",")
+          # ---------------------------------------------------
 
-          if not stock_list or not feishu_webhook:
-              print("请配置 STOCK_LIST 和 FEISHU_WEBHOOK")
-              exit(1)
+          def get_recent_trade_date() -> str:
+              """获取最近一个有数据的交易日，避免非交易日报错"""
+              today = datetime.today()
+              for i in range(7):
+                  date = (today - timedelta(days=i)).strftime("%Y%m%d")
+                  try:
+                      df = ak.stock_zh_index_daily(symbol="sh000001", start_date=date, end_date=date)
+                      if not df.empty:
+                          return date
+                  except Exception:
+                      continue
+              return "20260327"  # 兜底日期
 
-          report = "【每日股票分析】\n"
-          for code in stock_list:
+          def send_feishu_message(content: str):
+              """发送消息到飞书"""
+              if not FEISHU_WEBHOOK_URL:
+                  print("飞书 Webhook 未配置，跳过发送")
+                  return
+              message = {
+                  "msg_type": "text",
+                  "content": {"text": content}
+              }
               try:
-                  df = ak.stock_zh_a_daily(symbol=code, adjust="hfq")
-                  last = df.iloc[-1]
-                  change = (last["close"] - last["open"]) / last["open"] * 100
-                  report += f"- {code}: 收盘价 {last['close']:.2f}, 涨跌幅 {change:.2f}%\n"
+                  resp = requests.post(FEISHU_WEBHOOK_URL, json=message, timeout=10)
+                  resp.raise_for_status()
+                  print("飞书消息发送成功")
               except Exception as e:
-                  report += f"- {code}: 获取数据失败 ({e})\n"
+                  print(f"飞书消息发送失败: {e}")
 
-          msg = {"msg_type": "text", "content": {"text": report}}
-          requests.post(feishu_webhook, json=msg)
-          print("推送完成")
+          def analyze_stock(code: str, trade_date: str) -> str:
+              """分析单只股票，返回分析报告"""
+              try:
+                  df = ak.stock_zh_a_daily(symbol=code, start_date=trade_date, end_date=trade_date)
+                  if df.empty:
+                      return f"- {code}: 当日无交易数据，跳过\n"
+                  
+                  # 示例分析逻辑（可按你本地版逻辑修改）
+                  current_price = df["close"].iloc[-1]
+                  stop_loss = round(current_price * 0.98, 2)
+                  target_price = round(current_price * 1.04, 2)
+                  
+                  report = (
+                      f"【{code} 分析报告】\n"
+                      f"当前价: {current_price}\n"
+                      f"止损位: {stop_loss}\n"
+                      f"目标位: {target_price}\n"
+                      f"仓位建议: 轻仓试仓\n"
+                      f"建仓策略: 结合支撑位分批试仓，避免追高\n"
+                  )
+                  return report
+              except Exception as e:
+                  return f"- {code}: 获取数据失败 ({str(e)})\n"
+
+          def main():
+              trade_date = get_recent_trade_date()
+              print(f"使用交易日: {trade_date}")
+              
+              reports = []
+              for code in STOCK_LIST:
+                  code = code.strip()
+                  if not code:
+                      continue
+                  report = analyze_stock(code, trade_date)
+                  reports.append(report)
+              
+              full_report = "【每日股票分析】\n" + "\n".join(reports)
+              send_feishu_message(full_report)
+
+          if __name__ == "__main__":
+              main()
           EOF
-          python main.py
