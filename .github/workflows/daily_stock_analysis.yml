@@ -1,7 +1,8 @@
+
 name: Daily Stock Analysis (Feishu Only)
 on:
   schedule:
-    - cron: '30 6 * * 1-5'
+    - cron: '30 6 * * 1-5'  # 北京时间 14:30 周一至周五
   workflow_dispatch:
 
 jobs:
@@ -36,26 +37,6 @@ jobs:
 
           FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL")
           STOCK_LIST = os.getenv("STOCK_LIST").split(",") if os.getenv("STOCK_LIST") else []
-
-          # 财经新闻模块（和你样板风格一致）
-          def get_finance_news():
-              return """【📌 今日财经要闻】
-【宏观经济】
-1) 国家统计局：1-2月全国规模以上工业企业利润同比增长15.2%，较2025年全年加快14.6个百分点，41个工业大类行业中24个实现利润增长，经济复苏态势明确。
-2) 央行开展7天逆回购操作，净投放1257亿元，季末流动性呵护到位，市场资金面维持合理充裕。
-
-【A股市场】
-1) 沪指收报3913.72点(+0.63%)，深成指13760.37点(+1.13%)，创业板指+0.71%，两市合计成交1.86万亿元，4337只个股上涨，赚钱效应显著。
-2) 北向资金全天净流入23.5亿元，主力资金重点布局锂电、创新药、化工板块，绿电、银行板块出现回调。
-
-【行业热点】
-1) 创新药出海持续火热：2026年以来行业BD交易总额已达571亿美元，多家药企license-out交易落地，板块迎来估值修复。
-2) 锂矿及锂电板块领涨：主力资金净流入近百亿元，锂盐价格企稳回升，赣锋锂业、天齐锂业等多股涨幅超5%。
-
-【全球市场】
-1) 隔夜美股大幅回调：纳指跌2.38%，标普500跌1.74%，科技股领跌，Meta、AMD等跌幅超7%。
-2) 国际金价突破4440美元/盎司，创历史新高，避险情绪叠加美联储6月降息预期升温。
-3) 国际油价剧烈波动，WTI原油一度跌破95美元/桶，中东地缘政治紧张持续扰动能源市场。"""
 
           def get_recent_trade_date():
               today = datetime.today()
@@ -103,7 +84,6 @@ jobs:
                   low = df["low"].values
                   volume = df["volume"].values
 
-                  # 计算指标
                   ma5 = talib.SMA(close, timeperiod=5)[-1]
                   ma10 = talib.SMA(close, timeperiod=10)[-1]
                   ma20 = talib.SMA(close, timeperiod=20)[-1]
@@ -113,13 +93,11 @@ jobs:
                   current_price = close[-1]
                   price_change = (current_price - close[-2])/close[-2]*100 if len(close)>=2 else 0
 
-                  # 量能指标
                   vol_ma5 = talib.SMA(volume, timeperiod=5)[-1]
                   vol_current = volume[-1]
                   vol_ratio = vol_current / vol_ma5 if vol_ma5>0 else 1
                   vol_note = "缩量上涨" if vol_ratio < 0.9 and price_change>0 else "放量上涨" if vol_ratio>1.2 and price_change>0 else "平量"
 
-                  # 趋势判断
                   trend_strength = 0
                   if ma5 > ma10 > ma20:
                       trend = "bullish"
@@ -131,13 +109,11 @@ jobs:
                       trend = "weak_bearish"
                       trend_strength = 40
 
-                  # 支撑压力位
                   support = round(low[-5:].min() * 0.99, 2)
                   resistance = round(high[-5:].max() * 1.01, 2)
                   stop_loss = support
                   target = resistance
 
-                  # 仓位与策略
                   if trend == "bullish" and rsi < 60:
                       core_decision = "买入"
                       action_hold = "可继续持有，回踩关键位不破再考虑加仓"
@@ -154,7 +130,6 @@ jobs:
                       action_empty = "轻仓试仓，严格止损"
                       position = "轻仓试仓"
 
-                  # 组装研报格式
                   report = (
                       f"🟢 {code}\n"
                       f"📰 重要信息速览\n\n"
@@ -192,9 +167,7 @@ jobs:
 
           def main():
               trade_date = get_recent_trade_date()
-              news = get_finance_news()
-              report = f"📈【每日股票策略分析+财经要闻】\n📅 交易日: {trade_date}\n\n"
-              report += news + "\n\n"
+              report = f"📈【每日股票技术策略分析】\n📅 交易日: {trade_date}\n\n"
               report += "="*50 + "\n\n"
 
               for code in STOCK_LIST:
