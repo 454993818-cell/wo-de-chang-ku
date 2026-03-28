@@ -76,7 +76,7 @@ jobs:
                   start_date = (datetime.strptime(trade_date, "%Y%m%d") - timedelta(days=70)).strftime("%Y%m%d")
                   df = ak.stock_zh_a_daily(symbol=symbol, start_date=start_date, end_date=trade_date)
                   if df.empty or len(df) < 30:
-                      return f"- {code}: 样本不足\n", "观望"
+                      return f"- {code}: 样本不足\n", "观望", 0, "neutral"
 
                   df = df.sort_values("date").reset_index(drop=True)
                   close = df["close"].values
@@ -174,10 +174,10 @@ jobs:
                       f"• 风控策略: 止损参考 {stop_loss:.2f}\n\n"
                       f"{'='*50}\n"
                   )
-                  return rep, core_decision
+                  return rep, core_decision, trend_strength, trend
 
               except Exception as e:
-                  return f"- {code}: 分析失败({str(e)})\n", "观望"
+                  return f"- {code}: 分析失败({str(e)})\n", "观望", 0, "neutral"
 
           def main():
               trade_date = get_recent_trade_date()
@@ -188,12 +188,14 @@ jobs:
               wait_cnt = 0
               sell_cnt = 0
               stock_reports = []
+              summary_list = []
 
               for code in STOCK_LIST:
                   code = code.strip()
                   if code:
-                      rep, decision = analyze_stock(code, trade_date)
+                      rep, decision, score, trend = analyze_stock(code, trade_date)
                       stock_reports.append(rep)
+                      summary_list.append((code, decision, score, trend))
                       if "买入" in decision:
                           buy_cnt +=1
                       elif "观望" in decision:
@@ -203,10 +205,8 @@ jobs:
 
               report += f"💬 共分析 {len(STOCK_LIST)} 只股票 | 🟢买入:{buy_cnt} 🟡观望:{wait_cnt} 🔴卖出:{sell_cnt}\n\n"
               report += "📊 分析结果摘要\n"
-              for code in STOCK_LIST:
-                  code = code.strip()
-                  if code:
-                      report += f"🟢 {code}: {decision} | 评分 {trend_strength} | 技术面{trend}\n"
+              for code, decision, score, trend in summary_list:
+                  report += f"🟢 {code}: {decision} | 评分 {score} | 技术面{trend}\n"
               report += "\n" + "="*50 + "\n\n"
 
               for rep in stock_reports:
