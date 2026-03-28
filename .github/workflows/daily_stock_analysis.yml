@@ -76,7 +76,7 @@ jobs:
                   start_date = (datetime.strptime(trade_date, "%Y%m%d") - timedelta(days=70)).strftime("%Y%m%d")
                   df = ak.stock_zh_a_daily(symbol=symbol, start_date=start_date, end_date=trade_date)
                   if df.empty or len(df) < 30:
-                      return f"- {code}: 样本不足\n"
+                      return f"- {code}: 样本不足\n", "观望"
 
                   df = df.sort_values("date").reset_index(drop=True)
                   close = df["close"].values
@@ -91,76 +91,129 @@ jobs:
                   macd, macdsignal, macdhist = talib.MACD(close)
                   upper, middle, lower = talib.BBANDS(close, 20)
                   current_price = close[-1]
-                  price_change = (current_price - close[-2])/close[-2]*100
+                  price_change = (current_price - close[-2])/close[-2]*100 if len(close)>=2 else 0
 
                   vol_ma5 = talib.SMA(volume,5)[-1]
                   vol_current = volume[-1]
-                  vol_signal = "放量" if vol_current>vol_ma5*1.3 else "缩量" if vol_current<vol_ma5*0.7 else "平量"
+                  vol_ratio = vol_current / vol_ma5 if vol_ma5>0 else 1
+                  vol_note = "缩量上涨" if vol_ratio < 0.9 and price_change>0 else "放量上涨" if vol_ratio>1.2 and price_change>0 else "平量"
+                  turnover = df['volume'].iloc[-1]/(df['high'].iloc[-1]*10000) if df['high'].iloc[-1] else 0
 
-                  trend = "多头" if ma5>ma10>ma20 else "空头" if ma5<ma10<ma20 else "震荡"
+                  if ma5 > ma10 > ma20:
+                      trend = "bullish"
+                      trend_strength = 60
+                  elif ma5 < ma10 < ma20:
+                      trend = "bearish"
+                      trend_strength = 30
+                  else:
+                      trend = "weak_bearish"
+                      trend_strength = 40
+
+                  support = round(low[-5:].min() * 0.99, 2)
+                  resistance = round(high[-5:].max() * 1.01, 2)
+                  stop_loss = support
+                  target = resistance
+                  buy_point = support
+                  secondary_buy = support
+
+                  if trend == "bullish" and rsi < 60:
+                      core_decision = "买入"
+                      action_hold = "可继续持有，回踩关键位不破再考虑加仓"
+                      action_empty = "可结合支撑位分批试仓，避免一次性追高"
+                      position = "轻仓试仓"
+                  elif trend == "bearish" or rsi > 70:
+                      core_decision = "观望/减仓"
+                      action_hold = "逢高减仓，控制风险"
+                      action_empty = "观望为主，等待企稳信号"
+                      position = "观望"
+                  else:
+                      core_decision = "中性"
+                      action_hold = "继续持有，关注支撑位有效性"
+                      action_empty = "轻仓试仓，严格止损"
+                      position = "轻仓试仓"
+
                   rsi_note = "超买" if rsi>70 else "超卖" if rsi<30 else "中性"
-                  bb_note = "上轨压力" if current_price>upper[-1] else "下轨支撑" if current_price<lower[-1] else "通道内"
+                  bias = abs((current_price - ma5)/ma5*100)
+                  bias_note = "偏高" if current_price>ma5 else "偏低"
                   macd_note = "金叉" if macd[-1]>macdsignal[-1] else "死叉"
 
-                  score = 0
-                  if trend=="多头": score+=3
-                  if trend=="空头": score-=3
-                  if vol_signal=="放量" and price_change>0: score+=2
-                  if vol_signal=="放量" and price_change<0: score-=2
-                  if rsi<30: score+=2
-                  if rsi>70: score-=2
-                  if current_price < lower[-1]: score+=2
-                  if current_price > upper[-1]: score-=2
-
-                  if score>=4:
-                      strategy="强烈看多→加仓/建仓"
-                      sl=round(current_price*0.96,2)
-                      tg=round(current_price*1.08,2)
-                  elif score>=1:
-                      strategy="谨慎看多→轻仓试仓"
-                      sl=round(current_price*0.97,2)
-                      tg=round(current_price*1.06,2)
-                  elif score<=-4:
-                      strategy="强烈看空→减仓/清仓"
-                      sl=tg=None
-                  elif score<=-1:
-                      strategy="谨慎看空→观望"
-                      sl=tg=None
-                  else:
-                      strategy="中性震荡→多看少动"
-                      sl=round(current_price*0.98,2)
-                      tg=round(current_price*1.04,2)
+                  eng_text = (
+                      f"The stock shows a {trend} trend with MA alignment, "
+                      f"{'strong buy' if core_decision=='买入' else 'wait'} signal from trend analysis, "
+                      f"and key chart patterns indicating potential for {'upward' if trend_strength>=50 else 'sideways'} movement."
+                  )
 
                   rep = (
-                      f"【{code}】\n"
-                      f"📊 现价:{current_price:.2f} | 涨跌幅:{price_change:.2f}%\n"
-                      f"📉 均线:{ma5:.2f}/{ma10:.2f}/{ma20:.2f} → {trend}\n"
-                      f"⚡ RSI(14):{rsi:.1f} → {rsi_note}\n"
-                      f"📈 量能:{vol_signal} | MACD:{macd_note}\n"
-                      f"🎯 布林带:{bb_note}\n"
-                      f"💡 策略评分:{score} → {strategy}\n"
+                      f"🟢 {code}\n"
+                      f"📰 重要信息速览\n\n"
+                      f"📍 核心结论\n"
+                      f"🟢 {core_decision} | 技术面{trend}，趋势评分 {trend_strength}/100\n\n"
+                      f"💬 一句话决策: {eng_text}\n\n"
+                      f"⏱️ 时效性: 本周内\n\n"
+                      f"• 持仓情况: 空仓者 | 操作建议: {action_empty}\n"
+                      f"• 持仓情况: 持仓者 | 操作建议: {action_hold}\n\n"
+                      f"📊 数据透视\n"
+                      f"均线排列: {trend} | 多头排列: {'✅' if trend=='bullish' else '❌'} | 趋势强度: {trend_strength}/100\n\n"
+                      f"• 价格指标: 当前价 | 当前价: {current_price:.2f}\n"
+                      f"• 价格指标: MA5 | 当前价: {ma5:.2f}\n"
+                      f"• 价格指标: MA10 | 当前价: {ma10:.2f}\n"
+                      f"• 价格指标: MA20 | 当前价: {ma20:.2f}\n"
+                      f"• 价格指标: 乖离率(MA5) | 当前价: {bias:.2f}% {bias_note}\n"
+                      f"• 价格指标: 支撑位 | 当前价: {support:.2f}\n"
+                      f"• 价格指标: 压力位 | 当前价: {resistance:.2f}\n\n"
+                      f"成交量: 量比 {vol_ratio:.2f} ({vol_note}) | 换手率 {turnover:.1f}%\n\n"
+                      f"💡 技术面解读: {eng_text}\n\n"
+                      f"🎯 作战计划\n"
+                      f"📍 操作点位\n"
+                      f"• 操作点位: 🎯 理想买入点 | 当前价: {buy_point:.2f}\n"
+                      f"• 操作点位: 🔵 次优买入点 | 当前价: {secondary_buy:.2f}\n"
+                      f"• 操作点位: 🔴 止损位 | 当前价: {stop_loss:.2f}\n"
+                      f"• 操作点位: 🎉 目标位 | 当前价: {target:.2f}\n\n"
+                      f"💰 仓位建议: {position}\n"
+                      f"• 建仓策略: {action_empty}\n"
+                      f"• 风控策略: 止损参考 {stop_loss:.2f}\n\n"
+                      f"{'='*50}\n"
                   )
-                  if sl and tg:
-                      rep += f"🛡️ 止损:{sl} | 🎯 目标:{tg}\n\n"
-                  else:
-                      rep += "\n"
-                  return rep
+                  return rep, core_decision
 
               except Exception as e:
-                  return f"- {code}: 分析失败({str(e)})\n"
+                  return f"- {code}: 分析失败({str(e)})\n", "观望"
 
           def main():
               trade_date = get_recent_trade_date()
+              report = f"📈 A股智能分析报告\n"
+              report += f"🎯 {datetime.now().strftime('%Y-%m-%d')} 决策仪表盘\n\n"
 
-              report = f"📈【每日股票策略分析】\n📅 交易日:{trade_date}\n\n"
-              report += "="*50 + "\n\n"
+              buy_cnt = 0
+              wait_cnt = 0
+              sell_cnt = 0
+              stock_reports = []
 
               for code in STOCK_LIST:
                   code = code.strip()
                   if code:
-                      report += analyze_stock(code, trade_date)
+                      rep, decision = analyze_stock(code, trade_date)
+                      stock_reports.append(rep)
+                      if "买入" in decision:
+                          buy_cnt +=1
+                      elif "观望" in decision:
+                          wait_cnt +=1
+                      elif "卖出" in decision:
+                          sell_cnt +=1
 
-              report += "⚠️ 本报告仅供参考，不构成投资建议"
+              report += f"💬 共分析 {len(STOCK_LIST)} 只股票 | 🟢买入:{buy_cnt} 🟡观望:{wait_cnt} 🔴卖出:{sell_cnt}\n\n"
+              report += "📊 分析结果摘要\n"
+              for code in STOCK_LIST:
+                  code = code.strip()
+                  if code:
+                      report += f"🟢 {code}: {decision} | 评分 {trend_strength} | 技术面{trend}\n"
+              report += "\n" + "="*50 + "\n\n"
+
+              for rep in stock_reports:
+                  report += rep
+
+              report += f"\n报告生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+              report += "\n⚠️ 本报告仅供参考，不构成投资建议"
               send_feishu(report)
 
           if __name__ == "__main__":
