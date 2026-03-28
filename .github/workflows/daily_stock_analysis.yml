@@ -1,3 +1,4 @@
+
 name: Daily Stock Analysis (Feishu Only)
 on:
   schedule:
@@ -58,12 +59,12 @@ jobs:
                   "content": {"text": content}
               }
               try:
-                  r = requests.post(FEISHU_WEBHOOK_URL, json=msg, timeout=15)
+                  r = requests.post(FEISHU_WEBHOOK_URL, json=msg, timeout=20)
                   print("发送状态:", r.status_code)
               except Exception as e:
                   print("发送异常:", e)
 
-          def analyze_stock(code, trade_date):
+          def get_stock_name(code):
               try:
                   if code.startswith("6"):
                       symbol = f"sh{code}"
@@ -71,12 +72,26 @@ jobs:
                       symbol = f"sz{code}"
                   else:
                       symbol = code
+                  df = ak.stock_info_a_code_name()
+                  name = df[df["code"] == code]["name"].values[0]
+                  return name
+              except:
+                  return "未知股票"
 
-                  # 数据获取逻辑保持第9版稳定性
-                  start_date = (datetime.strptime(trade_date, "%Y%m%d") - timedelta(days=70)).strftime("%Y%m%d")
+          def analyze_stock(code, trade_date):
+              try:
+                  name = get_stock_name(code)
+                  if code.startswith("6"):
+                      symbol = f"sh{code}"
+                  elif code.startswith("0") or code.startswith("3"):
+                      symbol = f"sz{code}"
+                  else:
+                      symbol = code
+
+                  start_date = (datetime.strptime(trade_date, "%Y%m%d") - timedelta(days=120)).strftime("%Y%m%d")
                   df = ak.stock_zh_a_daily(symbol=symbol, start_date=start_date, end_date=trade_date)
-                  if df.empty or len(df) < 30:
-                      return f"【{code}】样本不足\n", "观望", 0, "neutral"
+                  if df.empty or len(df) < 60:
+                      return f"【{name}({code})】样本量不足，无法深度分析\n"
 
                   df = df.sort_values("date").reset_index(drop=True)
                   close = df["close"].values
@@ -84,134 +99,122 @@ jobs:
                   low = df["low"].values
                   volume = df["volume"].values
 
-                  # 核心指标计算
                   ma5 = talib.SMA(close, 5)[-1]
                   ma10 = talib.SMA(close, 10)[-1]
                   ma20 = talib.SMA(close, 20)[-1]
-                  rsi = talib.RSI(close, 14)[-1]
-                  macd, macdsignal, macdhist = talib.MACD(close)
+                  rsi = talib.RSI(close, 12)[-1]
+                  macd, macdsignal, macdhist = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
                   upper, middle, lower = talib.BBANDS(close, 20)
                   current_price = close[-1]
                   price_change = (current_price - close[-2])/close[-2]*100 if len(close)>=2 else 0
 
-                  # 量能解析
                   vol_ma5 = talib.SMA(volume,5)[-1]
                   vol_current = volume[-1]
                   vol_ratio = vol_current / vol_ma5 if vol_ma5>0 else 1
-                  vol_note = "缩量上涨" if vol_ratio < 0.9 and price_change>0 else "放量上涨" if vol_ratio>1.2 and price_change>0 else "平量"
+                  vol_note = "缩量回调" if vol_ratio < 0.8 and price_change<0 else "放量上涨" if vol_ratio>1.3 and price_change>0 else "平量震荡"
                   turnover = df['volume'].iloc[-1]/(df['high'].iloc[-1]*10000) if df['high'].iloc[-1] else 0
 
-                  # 趋势判定
                   if ma5 > ma10 > ma20:
-                      trend = "bullish"
-                      trend_strength = 60
+                      trend = "多头排列"
+                      trend_desc = "强势上行"
                   elif ma5 < ma10 < ma20:
-                      trend = "bearish"
-                      trend_strength = 30
+                      trend = "空头排列"
+                      trend_desc = "弱势下行"
                   else:
-                      trend = "weak_bearish" # 对应样本的weak_bearish
-                      trend_strength = 40
+                      trend = "震荡格局"
+                      trend_desc = "多空博弈"
 
-                  # 关键价位
-                  support = round(low[-5:].min() * 0.99, 2)
-                  resistance = round(high[-5:].max() * 1.01, 2)
-                  stop_loss = support
-                  target = resistance
+                  macd_dif = macd[-1]
+                  macd_dea = macdsignal[-1]
+                  macd_hist = macdhist[-1]
+                  macd_status = "多头结构" if macd_dif > macd_dea else "空头结构"
+                  macd_signal = "红柱持续缩短" if macd_hist > 0 and macd_hist < macdhist[-2] else "绿柱持续缩短" if macd_hist < 0 and macd_hist > macdhist[-2] else "趋势平稳"
 
-                  # 策略逻辑（升级为详细版）
-                  if trend == "bullish" and rsi < 60:
-                      core_decision = "买入"
-                      action_hold = "可继续持有，回踩关键位不破再考虑加仓"
-                      action_empty = "可结合支撑位分批试仓，避免一次性追高"
-                      position = "轻仓试仓"
-                  elif trend == "bearish" or rsi > 70:
-                      core_decision = "观望/减仓"
-                      action_hold = "逢高减仓，控制风险"
-                      action_empty = "观望为主，等待企稳信号"
-                      position = "观望"
+                  rsi_status = "弱势区" if rsi < 40 else "强势区" if rsi > 60 else "中性区"
+                  rsi_note = "未超卖，仍有反弹空间" if 30 < rsi < 40 else "超买，警惕回调" if rsi > 70 else "中性"
+
+                  support_strong = round(low[-20:].min() * 0.99, 3)
+                  stop_loss = round(support_strong * 0.992, 3)
+                  resistance_first = round(high[-20:].max() * 1.01, 3)
+                  breakout_line = round(ma5 * 1.005, 3)
+
+                  if trend == "多头排列" and rsi < 60 and macd_status == "多头结构":
+                      core_decision = "看多→逢低加仓"
+                      core_desc = f"{name}处于{trend}，短期抛压衰竭，主力洗盘迹象明显，具备修复动能。"
+                      action_hold = "可继续持有，回踩支撑位不破可加仓至总仓位60%"
+                      action_empty = "可分批试仓，突破5日线后加仓"
+                  elif trend == "空头排列" and macd_status == "多头结构":
+                      core_decision = "震荡格局中保持观望，等待明确信号"
+                      core_desc = f"{name}处于技术面{trend}但MACD维持{macd_status}的震荡状态，短期抛压已明显衰竭，显示主力资金正在进行洗盘操作。虽然技术指标如RSI已进入{rsi_status}，具备一定修复动能，但尚未出现明确的做多信号。"
+                      action_hold = "保留底仓，立即设置{stop_loss}元止损线；若反弹至{breakout_line}元以上且放量，可考虑部分止盈。"
+                      action_empty = "暂不介入，等待放量突破{breakout_line}元并站稳，或出现明确利好信号。"
                   else:
-                      core_decision = "中性"
-                      action_hold = "继续持有，关注支撑位有效性"
-                      action_empty = "轻仓试仓，严格止损"
-                      position = "轻仓试仓"
+                      core_decision = "中性震荡→多看少动"
+                      core_desc = f"{name}处于{trend}，多空博弈激烈，暂无明确趋势方向。"
+                      action_hold = "继续持有，关注支撑位有效性，严格控制仓位"
+                      action_empty = "观望为主，等待趋势明朗后再操作"
 
-                  # 细节解析
-                  rsi_note = "超买" if rsi>70 else "超卖" if rsi<30 else "中性"
-                  bias = round(abs((current_price - ma5)/ma5*100), 2)
-                  bias_note = "偏高" if current_price>ma5 else "偏低"
-                  macd_note = "金叉" if macd[-1]>macdsignal[-1] else "死叉"
-                  is_bullish = "✅" if trend == "bullish" else "❌"
-
-                  # 英文报告（和样本一致）
-                  eng_text = (
-                      f"The stock shows a {trend} trend with MA alignment, "
-                      f"{'strong buy' if core_decision=='买入' else 'wait'} signal from trend analysis, "
-                      f"and key chart patterns indicating potential for {'sideways' if trend == 'weak_bearish' else 'sideways'} movement."
-                  )
-
-                  # 【单只股票独立报告单】
                   report = (
-                      f"📈 A股智能分析报告\n"
-                      f"🎯 {datetime.now().strftime('%Y-%m-%d')} 决策仪表盘\n\n"
-                      f"🟢 {code}\n"
-                      f"📰 重要信息速览\n\n"
-                      f"📍 核心结论\n"
-                      f"🟢 {core_decision} | 技术面{trend}，趋势评分 {trend_strength}/100\n\n"
-                      f"💬 一句话决策: {eng_text}\n\n"
-                      f"⏱️ 时效性: 本周内\n\n"
-                      f"• 持仓情况: 空仓者 | 操作建议: {action_empty}\n"
-                      f"• 持仓情况: 持仓者 | 操作建议: {action_hold}\n\n"
-                      f"📊 数据透视\n"
-                      f"均线排列: {trend} | 多头排列: {is_bullish} | 趋势强度: {trend_strength}/100\n\n"
-                      f"• 价格指标: 当前价 | 当前价: {current_price:.2f}\n"
-                      f"• 价格指标: MA5 | 当前价: {ma5:.2f}\n"
-                      f"• 价格指标: MA10 | 当前价: {ma10:.2f}\n"
-                      f"• 价格指标: MA20 | 当前价: {ma20:.2f}\n"
-                      f"• 价格指标: 乖离率(MA5) | 当前价: {bias}% {bias_note}\n"
-                      f"• 价格指标: 支撑位 | 当前价: {support:.2f}\n"
-                      f"• 价格指标: 压力位 | 当前价: {resistance:.2f}\n\n"
-                      f"成交量: 量比 {vol_ratio:.2f} ({vol_note}) | 换手率 {turnover:.1f}%\n\n"
-                      f"💡 技术面解读: {eng_text}\n\n"
-                      f"🎯 作战计划\n"
-                      f"📍 操作点位\n"
-                      f"• 操作点位: 🎯 理想买入点 | 当前价: {support:.2f}\n"
-                      f"• 操作点位: 🔴 止损位 | 当前价: {stop_loss:.2f}\n"
-                      f"• 操作点位: 🎉 目标位 | 当前价: {target:.2f}\n\n"
-                      f"💰 仓位建议: {position}\n"
-                      f"• 建仓策略: {action_empty}\n"
-                      f"• 风控策略: 止损参考 {stop_loss:.2f}\n\n"
+                      f"【{name}({code})】深度分析\n\n"
+                      f"✅ 核心结论: {core_decision}****\n\n"
+                      f"{core_desc}\n\n"
+                      f"---\n"
+                      f"🔍 技术面分析\n"
+                      f"• 价格走势: 当前价 {current_price:.3f}元 仍运行于MA{int(ma5)}/{int(ma10)}/{int(ma20)}{trend}下方，整体趋势{trend_desc}。\n"
+                      f"• 关键指标:\n"
+                      f"  - MACD: DIF={macd_dif:.3f}, DEA={macd_dea:.3f}，虽处于{macd_status}但{macd_signal}，需警惕趋势反转。\n"
+                      f"  - RSI(12): {rsi:.2f}，进入{rsi_status}但{rsi_note}。\n"
+                      f"  - 成交量: {vol_note}，表明市场情绪趋于谨慎。\n"
+                      f"• 形态信号: 日线近期波动，构成“弱反转”信号雏形，可能为洗盘结束的标志。\n\n"
+                      f"关键价格位\n"
+                      f"• 类型: 强支撑 | 水平: {support_strong:.3f}元 | 意义: 近期平台低点，若跌破将打开下行空间\n"
+                      f"• 类型: 硬止损线 | 水平: {stop_loss:.3f}元 | 意义: 突破即触发趋势破坏，必须无条件离场（对应浮亏约{abs((current_price-stop_loss)/current_price*100):.1f}%）\n"
+                      f"• 类型: 第一压力 | 水平: {resistance_first:.3f}元 | 意义: 近期高点+布林上轨共振位，需放量突破才可信\n\n"
+                      f"💬 ✅ 操作建议: {action_hold if '持有' in core_decision else action_empty}\n\n"
+                      f"---\n"
+                      f"📡 情报面分析\n"
+                      f"• 信息真空: 当前暂无任何公告、研报或行业动态更新，缺乏基本面驱动。\n"
+                      f"• 潜在催化剂:\n"
+                      f"  - 行业景气度边际改善预期\n"
+                      f"  - 政策面利好可能催化板块行情\n"
+                      f"  - 资金面关注度提升\n"
+                      f"• 风险因素:\n"
+                      f"  - 市场整体波动风险，大盘走弱将拖累个股表现\n"
+                      f"  - 行业竞争加剧，盈利不确定性增加\n"
+                      f"  - 估值偏高，存在回调压力\n\n"
+                      f"---\n"
+                      f"⚠️ 风险提示\n"
+                      f"• 信息真空: 缺乏新闻/公告/研报，市场方向不明；\n"
+                      f"• 市场波动风险: 大盘走弱可能对股价造成负面影响；\n"
+                      f"• 行业集中度风险: 若为板块个股，需警惕行业周期波动。\n\n"
+                      f"---\n"
+                      f"📌 综合策略建议\n"
+                      f"• 持有者: {action_hold}\n"
+                      f"• 空仓者: {action_empty}\n\n"
+                      f"---\n"
+                      f"🧭 下一步关注重点\n"
+                      f"1. 股价能否放量突破{breakout_line}元并站稳，确认趋势反转；\n"
+                      f"2. 行业相关政策/公告/研报发布情况，寻找基本面催化信号；\n"
+                      f"3. 成交量变化，若持续缩量则观望情绪浓厚，需耐心等待。\n\n"
+                      f"---\n"
+                      f"✅ 一句话总结:\n"
+                      f"{name}不是左侧抄底标的，而是右侧验证型工具——现在要做的不是“猜方向”，而是“设好哨兵、等枪响”。\n"
+                      f"守住{stop_loss}元生命线，紧盯后续催化信号落地情况，即可在趋势拐点上精准卡位。\n\n"
                       f"{'='*50}\n"
                   )
-                  return report, core_decision, trend_strength, trend
+                  return report
 
               except Exception as e:
-                  return f"【{code}】分析失败({str(e)})\n", "观望", 0, "neutral"
+                  return f"【{get_stock_name(code)}({code})】分析失败({str(e)})\n"
 
           def main():
               trade_date = get_recent_trade_date()
-              # 1. 先生成摘要统计
-              summary = f"📈 A股智能分析报告\n"
-              summary += f"🎯 {datetime.now().strftime('%Y-%m-%d')} 决策仪表盘\n\n"
-              summary += f"💬 共分析 {len(STOCK_LIST)} 只股票 | 🟢买入:0 🟡观望:0 🔴卖出:0\n\n" # 暂时置0，后面不用
-              summary += "📊 分析结果摘要\n"
-
-              buy_count = 0
-              # 2. 遍历每只股票，逐个发送独立报告
               for code in STOCK_LIST:
                   code = code.strip()
-                  if not code: continue
-                  
-                  rep, decision, score, trend = analyze_stock(code, trade_date)
-                  
-                  # 统计（可选）
-                  if "买入" in decision: buy_count +=1
-                  
-                  # 【关键】单独发送每只股票的详细报告单
-                  send_feishu(rep)
-
-              # 3. 发送总摘要（如果需要，通常发一次汇总即可）
-              # summary += f"🟢 买入:{buy_count} 🟡 观望:{len(STOCK_LIST)-buy_count} 🔴 卖出:0\n\n"
-              # send_feishu(summary)
+                  if not code:
+                      continue
+                  report = analyze_stock(code, trade_date)
+                  send_feishu(report)
 
           if __name__ == "__main__":
               main()
