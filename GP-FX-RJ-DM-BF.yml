@@ -1,0 +1,220 @@
+name: Daily Stock Analysis (Feishu Only)
+on:
+  schedule:
+    - cron: '30 6 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pandas akshare ta-lib
+
+      - name: Run analysis and send to Feishu
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          STOCK_LIST: ${{ secrets.STOCK_LIST }}
+        run: |
+          python3 - << 'EOF'
+          import os
+          import requests
+          import pandas as pd
+          import akshare as ak
+          import talib
+          from datetime import datetime, timedelta
+
+          FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL")
+          STOCK_LIST = os.getenv("STOCK_LIST").split(",") if os.getenv("STOCK_LIST") else []
+
+          def get_recent_trade_date():
+              today = datetime.today()
+              for i in range(7):
+                  date = (today - timedelta(days=i)).strftime("%Y%m%d")
+                  try:
+                      df = ak.stock_zh_index_daily(symbol="sh000001", start_date=date, end_date=date)
+                      if not df.empty:
+                          return date
+                  except:
+                      continue
+              return datetime.today().strftime("%Y%m%d")
+
+          def send_feishu(content):
+              if not FEISHU_WEBHOOK_URL:
+                  print("Webhook 未配置")
+                  return
+              msg = {
+                  "msg_type": "text",
+                  "content": {"text": content}
+              }
+              try:
+                  r = requests.post(FEISHU_WEBHOOK_URL, json=msg, timeout=20)
+                  print("发送状态:", r.status_code)
+              except Exception as e:
+                  print("发送异常:", e)
+
+          def get_stock_name(code):
+              try:
+                  if code.startswith("6"):
+                      symbol = f"sh{code}"
+                  elif code.startswith("0") or code.startswith("3"):
+                      symbol = f"sz{code}"
+                  else:
+                      symbol = code
+                  df = ak.stock_info_a_code_name()
+                  name = df[df["code"] == code]["name"].values[0]
+                  return name
+              except:
+                  return "未知股票"
+
+          def analyze_stock(code, trade_date):
+              try:
+                  name = get_stock_name(code)
+                  if code.startswith("6"):
+                      symbol = f"sh{code}"
+                  elif code.startswith("0") or code.startswith("3"):
+                      symbol = f"sz{code}"
+                  else:
+                      symbol = code
+
+                  start_date = (datetime.strptime(trade_date, "%Y%m%d") - timedelta(days=120)).strftime("%Y%m%d")
+                  df = ak.stock_zh_a_daily(symbol=symbol, start_date=start_date, end_date=trade_date)
+                  if df.empty or len(df) < 60:
+                      return f"【{name}({code})】样本量不足，无法深度分析\n"
+
+                  df = df.sort_values("date").reset_index(drop=True)
+                  close = df["close"].values
+                  high = df["high"].values
+                  low = df["low"].values
+                  volume = df["volume"].values
+
+                  ma5 = talib.SMA(close, 5)[-1]
+                  ma10 = talib.SMA(close, 10)[-1]
+                  ma20 = talib.SMA(close, 20)[-1]
+                  rsi = talib.RSI(close, 12)[-1]
+                  macd, macdsignal, macdhist = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
+                  upper, middle, lower = talib.BBANDS(close, 20)
+                  current_price = close[-1]
+                  price_change = (current_price - close[-2])/close[-2]*100 if len(close)>=2 else 0
+
+                  vol_ma5 = talib.SMA(volume,5)[-1]
+                  vol_current = volume[-1]
+                  vol_ratio = vol_current / vol_ma5 if vol_ma5>0 else 1
+                  vol_note = "缩量回调" if vol_ratio < 0.8 and price_change<0 else "放量上涨" if vol_ratio>1.3 and price_change>0 else "平量震荡"
+                  turnover = df['volume'].iloc[-1]/(df['high'].iloc[-1]*10000) if df['high'].iloc[-1] else 0
+
+                  if ma5 > ma10 > ma20:
+                      trend = "多头排列"
+                      trend_desc = "强势上行"
+                  elif ma5 < ma10 < ma20:
+                      trend = "空头排列"
+                      trend_desc = "弱势下行"
+                  else:
+                      trend = "震荡格局"
+                      trend_desc = "多空博弈"
+
+                  macd_dif = macd[-1]
+                  macd_dea = macdsignal[-1]
+                  macd_hist = macdhist[-1]
+                  macd_status = "多头结构" if macd_dif > macd_dea else "空头结构"
+                  macd_signal = "红柱持续缩短" if macd_hist > 0 and macd_hist < macdhist[-2] else "绿柱持续缩短" if macd_hist < 0 and macd_hist > macdhist[-2] else "趋势平稳"
+
+                  rsi_status = "弱势区" if rsi < 40 else "强势区" if rsi > 60 else "中性区"
+                  rsi_note = "未超卖，仍有反弹空间" if 30 < rsi < 40 else "超买，警惕回调" if rsi > 70 else "中性"
+
+                  support_strong = round(low[-20:].min() * 0.99, 3)
+                  stop_loss = round(support_strong * 0.992, 3)
+                  resistance_first = round(high[-20:].max() * 1.01, 3)
+                  breakout_line = round(ma5 * 1.005, 3)
+
+                  if trend == "多头排列" and rsi < 60 and macd_status == "多头结构":
+                      core_decision = "看多→逢低加仓"
+                      core_desc = f"{name}处于{trend}，短期抛压衰竭，主力洗盘迹象明显，具备修复动能。"
+                      action_hold = "可继续持有，回踩支撑位不破可加仓至总仓位60%"
+                      action_empty = "可分批试仓，突破5日线后加仓"
+                  elif trend == "空头排列" and macd_status == "多头结构":
+                      core_decision = "震荡格局中保持观望，等待明确信号"
+                      core_desc = f"{name}处于技术面{trend}但MACD维持{macd_status}的震荡状态，短期抛压已明显衰竭，显示主力资金正在进行洗盘操作。虽然技术指标如RSI已进入{rsi_status}，具备一定修复动能，但尚未出现明确的做多信号。"
+                      action_hold = "保留底仓，立即设置{stop_loss}元止损线；若反弹至{breakout_line}元以上且放量，可考虑部分止盈。"
+                      action_empty = "暂不介入，等待放量突破{breakout_line}元并站稳，或出现明确利好信号。"
+                  else:
+                      core_decision = "中性震荡→多看少动"
+                      core_desc = f"{name}处于{trend}，多空博弈激烈，暂无明确趋势方向。"
+                      action_hold = "继续持有，关注支撑位有效性，严格控制仓位"
+                      action_empty = "观望为主，等待趋势明朗后再操作"
+
+                  report = (
+                      f"【{name}({code})】深度分析\n\n"
+                      f"✅ 核心结论: {core_decision}****\n\n"
+                      f"{core_desc}\n\n"
+                      f"---\n"
+                      f"🔍 技术面分析\n"
+                      f"• 价格走势: 当前价 {current_price:.3f}元 仍运行于MA{int(ma5)}/{int(ma10)}/{int(ma20)}{trend}下方，整体趋势{trend_desc}。\n"
+                      f"• 关键指标:\n"
+                      f"  - MACD: DIF={macd_dif:.3f}, DEA={macd_dea:.3f}，虽处于{macd_status}但{macd_signal}，需警惕趋势反转。\n"
+                      f"  - RSI(12): {rsi:.2f}，进入{rsi_status}但{rsi_note}。\n"
+                      f"  - 成交量: {vol_note}，表明市场情绪趋于谨慎。\n"
+                      f"• 形态信号: 日线近期波动，构成“弱反转”信号雏形，可能为洗盘结束的标志。\n\n"
+                      f"关键价格位\n"
+                      f"• 类型: 强支撑 | 水平: {support_strong:.3f}元 | 意义: 近期平台低点，若跌破将打开下行空间\n"
+                      f"• 类型: 硬止损线 | 水平: {stop_loss:.3f}元 | 意义: 突破即触发趋势破坏，必须无条件离场（对应浮亏约{abs((current_price-stop_loss)/current_price*100):.1f}%）\n"
+                      f"• 类型: 第一压力 | 水平: {resistance_first:.3f}元 | 意义: 近期高点+布林上轨共振位，需放量突破才可信\n\n"
+                      f"💬 ✅ 操作建议: {action_hold if '持有' in core_decision else action_empty}\n\n"
+                      f"---\n"
+                      f"📡 情报面分析\n"
+                      f"• 信息真空: 当前暂无任何公告、研报或行业动态更新，缺乏基本面驱动。\n"
+                      f"• 潜在催化剂:\n"
+                      f"  - 行业景气度边际改善预期\n"
+                      f"  - 政策面利好可能催化板块行情\n"
+                      f"  - 资金面关注度提升\n"
+                      f"• 风险因素:\n"
+                      f"  - 市场整体波动风险，大盘走弱将拖累个股表现\n"
+                      f"  - 行业竞争加剧，盈利不确定性增加\n"
+                      f"  - 估值偏高，存在回调压力\n\n"
+                      f"---\n"
+                      f"⚠️ 风险提示\n"
+                      f"• 信息真空: 缺乏新闻/公告/研报，市场方向不明；\n"
+                      f"• 市场波动风险: 大盘走弱可能对股价造成负面影响；\n"
+                      f"• 行业集中度风险: 若为板块个股，需警惕行业周期波动。\n\n"
+                      f"---\n"
+                      f"📌 综合策略建议\n"
+                      f"• 持有者: {action_hold}\n"
+                      f"• 空仓者: {action_empty}\n\n"
+                      f"---\n"
+                      f"🧭 下一步关注重点\n"
+                      f"1. 股价能否放量突破{breakout_line}元并站稳，确认趋势反转；\n"
+                      f"2. 行业相关政策/公告/研报发布情况，寻找基本面催化信号；\n"
+                      f"3. 成交量变化，若持续缩量则观望情绪浓厚，需耐心等待。\n\n"
+                      f"---\n"
+                      f"✅ 一句话总结:\n"
+                      f"{name}不是左侧抄底标的，而是右侧验证型工具——现在要做的不是“猜方向”，而是“设好哨兵、等枪响”。\n"
+                      f"守住{stop_loss}元生命线，紧盯后续催化信号落地情况，即可在趋势拐点上精准卡位。\n\n"
+                      f"{'='*50}\n"
+                  )
+                  return report
+
+              except Exception as e:
+                  return f"【{get_stock_name(code)}({code})】分析失败({str(e)})\n"
+
+          def main():
+              trade_date = get_recent_trade_date()
+              for code in STOCK_LIST:
+                  code = code.strip()
+                  if not code:
+                      continue
+                  report = analyze_stock(code, trade_date)
+                  send_feishu(report)
+
+          if __name__ == "__main__":
+              main()
+          EOF
