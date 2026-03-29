@@ -1,4 +1,3 @@
-
 name: Daily Finance News & Global Markets (Feishu Only)
 on:
   schedule:
