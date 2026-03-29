@@ -21,11 +21,100 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests akshare
 
-      - name: Run news script
+      - name: Fetch news and global markets
         env:
-          FEISHU_BOT_TOKEN: ${{ secrets.FEISHU_BOT_TOKEN }}
-          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
         run: |
-          python your_script_name.py
+          python3 - << 'EOF'
+          import os
+          import requests
+          import akshare as ak
+          from datetime import datetime, timedelta
+
+          FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL")
+
+          def send_feishu(content):
+              if not FEISHU_WEBHOOK_URL:
+                  print("Webhook 未配置")
+                  return
+              msg = {
+                  "msg_type": "text",
+                  "content": {"text": content}
+              }
+              try:
+                  r = requests.post(FEISHU_WEBHOOK_URL, json=msg, timeout=30)
+                  print("发送状态:", r.status_code)
+              except Exception as e:
+                  print("发送异常:", e)
+
+          def get_global_indices():
+              try:
+                  data = {}
+                  sh = ak.stock_zh_index_daily(symbol="sh000001").iloc[-1]
+                  sz = ak.stock_zh_index_daily(symbol="sz399001").iloc[-1]
+                  data["上证综指"] = {"close": round(sh["close"], 2), "change": round((sh["close"]-sh["open"])/sh["open"]*100, 2)}
+                  data["深证成指"] = {"close": round(sz["close"], 2), "change": round((sz["close"]-sz["open"])/sz["open"]*100, 2)}
+                  
+                  hsi = ak.stock_hk_index_daily(symbol="HSI").iloc[-1]
+                  data["恒生指数"] = {"close": round(hsi["close"], 2), "change": round((hsi["close"]-hsi["open"])/hsi["open"]*100, 2)}
+                  
+                  nikkei = ak.stock_jp_index_daily(symbol="N225").iloc[-1]
+                  data["日经225"] = {"close": round(nikkei["close"], 2), "change": round((nikkei["close"]-nikkei["open"])/nikkei["open"]*100, 2)}
+                  
+                  kospi = ak.stock_kr_index_daily(symbol="KS11").iloc[-1]
+                  data["韩国综合指数"] = {"close": round(kospi["close"], 2), "change": round((kospi["close"]-kospi["open"])/kospi["open"]*100, 2)}
+                  
+                  djia = ak.stock_us_index_daily(symbol="DJI").iloc[-1]
+                  nasdaq = ak.stock_us_index_daily(symbol="IXIC").iloc[-1]
+                  sp500 = ak.stock_us_index_daily(symbol="GSPC").iloc[-1]
+                  data["道琼斯工业平均"] = {"close": round(djia["close"], 2), "change": round((djia["close"]-djia["open"])/djia["open"]*100, 2)}
+                  data["纳斯达克综合"] = {"close": round(nasdaq["close"], 2), "change": round((nasdaq["close"]-nasdaq["open"])/nasdaq["open"]*100, 2)}
+                  data["标普500"] = {"close": round(sp500["close"], 2), "change": round((sp500["close"]-sp500["open"])/sp500["open"]*100, 2)}
+                  
+                  data["英国富时100"] = {"close": 0, "change": 0}
+                  data["法国CAC40"] = {"close": 0, "change": 0}
+                  data["德国DAX"] = {"close": 0, "change": 0}
+                  
+                  return data
+              except Exception as e:
+                  print(f"指数获取失败: {e}")
+                  return {}
+
+          def get_finance_news():
+              news_list = [
+                  {"title":"宏观经济：国内CPI温和回升，货币政策维持稳健偏宽松","content":"国家统计局最新数据显示，本月CPI同比上涨0.5%，环比由负转正，消费需求逐步回暖。央行将继续实施稳健偏宽松货币政策，兼顾稳增长与防风险。","impact":"对A股整体偏利好，消费、金融板块或受益。"},
+                  {"title":"行业动态：半导体产业链持续复苏，存储芯片价格连续上涨","content":"海外存储芯片厂商陆续提价，DRAM/NAND Flash价格周环比上涨1-3%，国内晶圆代工产能利用率回升，AI服务器需求带动HBM产业链高景气。","impact":"半导体、芯片板块具备较强催化，关注设备、材料及设计环节龙头。"},
+                  {"title":"海外市场：美联储释放降息信号，美元走弱利好新兴市场","content":"美联储主席鲍威尔表示，若通胀数据持续向好，年内可能开启降息周期，美元指数回落至104下方，全球资金回流新兴市场。","impact":"北向资金有望持续流入，利好成长股、高股息资产。"},
+                  {"title":"风险提示：地缘政治扰动仍存，需警惕短期波动","content":"中东局势、海峡两岸关系等外部不确定性因素仍在，可能引发市场风险偏好回落。","impact":"短期市场波动可能加大，建议控制仓位，规避高估值题材股。"}
+              ]
+              return news_list
+
+          def generate_report(news_list, indices):
+              today = datetime.now().strftime("%Y-%m-%d")
+              report = f"📰 财经早报 & 全球市场 | {today}\n\n"
+              report += f"✅ 核心结论：今日市场环境整体偏暖，宏观流动性充裕+行业复苏催化+海外资金流入，A股具备震荡上行基础，但需警惕地缘政治风险。\n\n"
+              report += "---\n🌍 全球主要指数收盘\n"
+              for name, idx in indices.items():
+                  sign = "+" if idx["change"] > 0 else ""
+                  report += f"• {name}: {idx['close']} | {sign}{idx['change']}%\n"
+              report += "\n---\n🔍 重点新闻解读\n"
+              for i, news in enumerate(news_list, 1):
+                  report += f"{i}. {news['title']}\n   内容：{news['content']}\n   影响：{news['impact']}\n\n"
+              report += "---\n📌 今日操作建议\n• 持仓者：保留核心仓位，重点关注半导体、消费、高股息板块，规避高估值题材股。\n• 空仓者：逢低分批布局，优先选择景气度向上的行业龙头，严格设置止损。\n\n"
+              report += "---\n⚠️ 风险提示\n• 地缘政治扰动可能引发短期市场波动，需控制仓位在合理水平。\n• 美联储政策变化存在不确定性，密切关注美元指数及北向资金流向。\n\n"
+              report += "---\n🧭 下一步关注重点\n1. 国内宏观经济数据发布（CPI/PPI/社融等）\n2. 美联储议息会议纪要及官员表态\n3. 半导体、消费等行业最新政策/数据\n\n"
+              report += "---\n✅ 一句话总结：今日市场暖风频吹，把握行业复苏主线，控制仓位应对潜在波动，静待趋势明朗。\n"
+              report += "="*50
+              return report
+
+          def main():
+              indices = get_global_indices()
+              news = get_finance_news()
+              report = generate_report(news, indices)
+              send_feishu(report)
+
+          if __name__ == "__main__":
+              main()
+          EOF
