@@ -1,7 +1,7 @@
 name: Daily Finance News & Global Markets (Feishu Only)
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 4 * * *'  # UTC 4:00 = 北京时间 12:00
   workflow_dispatch:
 
 jobs:
